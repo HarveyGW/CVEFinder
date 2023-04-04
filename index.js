@@ -95,33 +95,51 @@ client.on('interactionCreate', async (interaction) => {
 	  await interaction.reply({ embeds: [helpEmbed] });
 	}
 	if (commandName === COMMAND_LATEST) {
-	  const count = options.getInteger(OPTION_COUNT) || 10;
-	  try {
-	    const currentDate = new Date();
-	    const year = currentDate.getFullYear();
-	    const month = (currentDate.getMonth() + 1).toString().padStart(2, '0');
-	    const day = currentDate.getDate().toString().padStart(2, '0');
-	    const pubStartDate = `${year}-${month}-${day}T00:00:00.000Z`;
-	    const pubEndDate = new Date().toISOString().replace(/\.\d{3}/, ':00.000Z');
-	    const url = `https://services.nvd.nist.gov/rest/json/cves/1.0?resultsPerPage=${count}&startIndex=0&pubStartDate=${encodeURIComponent(pubStartDate)}&pubEndDate=${encodeURIComponent(pubEndDate)}`;
-	    console.log('URL:', url);
-	    const latestResponse = await axios.get(url);
-	    const latestResults = latestResponse.data.result.CVE_Items;
-	    if (latestResults.length === 0) {
-	      await interaction.reply({ content: 'No latest CVEs found.' });
-	    } else {
-	      await displaySearchResults(interaction, latestResults);
+	  (async () => {
+	    const count = options.getInteger(OPTION_COUNT) || 10;
+	    try {
+	      await interaction.deferReply();
+	      const currentDate = new Date();
+	      const startDate = new Date(currentDate);
+	      startDate.setDate(startDate.getDate() - 7);
+	      const endDate = currentDate;
+	
+	      const startDateString = encodeURIComponent(formatDate(startDate));
+	      const endDateString = encodeURIComponent(formatDate(endDate));
+	
+	      const url = `https://services.nvd.nist.gov/rest/json/cves/1.0?resultsPerPage=${count}&startIndex=0&pubStartDate=${startDateString}&pubEndDate=${endDateString}`;
+	      const latestResponse = await axios.get(url);
+	      const latestResults = latestResponse.data.result.CVE_Items;
+	      if (latestResults.length === 0) {
+	        await interaction.editReply({ content: 'No latest CVEs found.' });
+	      } else {
+	        const pages = [];
+	        for (const result of latestResults) {
+	          const cve = result.cve.CVE_data_meta.ID;
+	          const cveDescription = result.cve.description.description_data[0].value;
+	          const severity = result.impact.baseMetricV3 && result.impact.baseMetricV3.cvssV3 ? result.impact.baseMetricV3.cvssV3.baseSeverity : 'UNKNOWN';
+	
+	          const embed = new MessageEmbed()
+	            .setTitle(`${cve}`)
+	            .setColor(getSeverityColor(severity))
+	            .setDescription(cveDescription)
+	            .addField('Severity', severity);
+	
+	          pages.push(embed);
+	        }
+	        const emojiList = ['⬅️', '➡️'];
+	        const timeout = 60000; // Timeout for the pagination (in milliseconds)
+	        const sentMsg = await interaction.followUp({ embeds: [pages[0]], fetchReply: true });
+					paginationEmbed(interaction, pages, emojiList, timeout);
+	      }
+	    } catch (error) {
+	      console.error(error);
+	      await interaction.editReply({ content: 'An error occurred while fetching the latest CVEs. Please try again later.' });
 	    }
-	  } catch (error) {
-	    console.error(error);
-	    await interaction.reply({ content: 'An error occurred while fetching the latest CVEs. Please try again later.' });
-	  }
-	} 
-
-	
-	
-  if (commandName === COMMAND_LOOKUP) {
+	  })();
+	} else if (commandName === COMMAND_LOOKUP) {
     try {
+      await interaction.deferReply();
       let cve = options.getString(OPTION_CVE);
       if (!cve.startsWith(PREFIX_CVE)) {
         cve = PREFIX_CVE + cve;
@@ -138,40 +156,43 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription(cveDescription)
         .addField('Severity', severity);
 
-      await interaction.reply({ embeds: [embed] });
+      await interaction.editReply({ embeds: [embed] });
 
     } catch (error) {
       console.error(error);
-      await interaction.reply({ content: 'An error occurred while retrieving the CVE information. Please make sure the CVE number is correct.' });
+      await interaction.editReply({ content: 'An error occurred while retrieving the CVE information. Please make sure the CVE number is correct.' });
     }
   } else if (commandName === COMMAND_SEARCH) {
     const keyword = options.getString(OPTION_KEYWORD);
     try {
+      await interaction.deferReply();
       const searchResponse = await axios.get(`https://services.nvd.nist.gov/rest/json/cves/1.0?keyword=${encodeURIComponent(keyword)}`);
       const searchResults = searchResponse.data.result.CVE_Items;
       if (searchResults.length === 0) {
-        await interaction.reply({ content: 'No results found for the given keyword.' });
+        await interaction.editReply({ content: 'No results found for the given keyword.' });
       } else {
         await displaySearchResults(interaction, searchResults);
       }
     } catch (error) {
       console.error(error);
-      await interaction.reply({ content: 'An error occurred while searching for CVEs. Please try again later.' });
+      await interaction.editReply({ content: 'An error occurred while searching for CVEs. Please try again later.' });
     }
   }
+
 });
 
 async function paginationEmbed(interaction, pages, emojiList = ['⬅️', '➡️'], timeout = 60000) {
   let page = 0;
 
-  const message = await interaction.reply({ embeds: [pages[page]], fetchReply: true });
+  await interaction.editReply({ embeds: [pages[page]] });
+  const paginationMessage = await interaction.fetchReply();
 
   for (const emoji of emojiList) {
-    await message.react(emoji);
+    await paginationMessage.react(emoji);
   }
 
   const filter = (reaction, user) => emojiList.includes(reaction.emoji.name) && !user.bot;
-  const collector = message.createReactionCollector({ filter, time: timeout });
+  const collector = paginationMessage.createReactionCollector({ filter, time: timeout });
 
   collector.on('collect', async (reaction, user) => {
     reaction.users.remove(user.id);
@@ -187,12 +208,26 @@ async function paginationEmbed(interaction, pages, emojiList = ['⬅️', '➡�
         break;
     }
 
-    await message.edit({ embeds: [pages[page]] });
+    await paginationMessage.edit({ embeds: [pages[page]] });
   });
 
   collector.on('end', () => {
-    message.reactions.removeAll();
+    paginationMessage.reactions.removeAll();
   });
+}
+
+
+function formatDate(date) {
+  const yyyy = date.getFullYear();
+  const MM = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const HH = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  const ss = String(date.getSeconds()).padStart(2, '0');
+  const SSS = String(date.getMilliseconds()).padStart(3, '0');
+  const Z = ' UTC-00:00';
+
+  return `${yyyy}-${MM}-${dd}T${HH}:${mm}:${ss}:${SSS}${Z}`;
 }
 
 
